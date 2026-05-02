@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google TPUs 03 &mdash; Systolic Arrays, the Matmul Engine</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0a; --bg-card: #0d1117; --bg-code: #161b22;
+            --text-primary: #e6edf3; --text-secondary: #8b949e;
+            --accent: #4285F4; --accent-dim: #4285F444; --accent-glow: #4285F433;
+            --accent-2: #EA4335; --accent-3: #FBBC04; --accent-4: #34A853;
+            --border: #21262d;
+            --font-display: 'Space Grotesk', sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+            --font-body: 'Inter', sans-serif;
+            --max-width: 900px;
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body { background: var(--bg-primary); color: var(--text-primary); font-family: var(--font-body); font-size: 17px; line-height: 1.7; overflow-x: hidden; }
+        .hero { min-height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 2rem 1.5rem; text-align: center; position: relative; }
+        .hero::before { content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 700px; height: 600px; background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%); pointer-events: none; z-index: 0; }
+        .hero > * { position: relative; z-index: 1; }
+        .series-label { font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 1rem; }
+        .hero h1 { font-family: var(--font-display); font-size: clamp(2rem, 5vw, 3.2rem); font-weight: 700; color: var(--text-primary); line-height: 1.2; margin-bottom: 1rem; }
+        .hero h1 .accent { color: var(--accent); }
+        .hero .subtitle { font-size: 1.1rem; color: var(--text-secondary); max-width: 640px; margin-bottom: 2rem; }
+        .tags { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin-bottom: 2.5rem; }
+        .tag { font-family: var(--font-mono); font-size: 0.75rem; padding: 0.25rem 0.75rem; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); background: var(--accent-dim); white-space: nowrap; }
+        .pipeline { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.25rem; margin-bottom: 1rem; max-width: var(--max-width); }
+        .pipeline-step { font-family: var(--font-mono); font-size: 0.7rem; padding: 0.3rem 0.7rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; color: var(--text-secondary); white-space: nowrap; }
+        .pipeline-arrow { color: var(--accent); font-size: 0.9rem; font-weight: 700; }
+        .slide { min-height: 100vh; max-width: var(--max-width); margin: 0 auto; padding: 4rem 1.5rem; position: relative; display: flex; flex-direction: column; justify-content: center; }
+        .slide-number { font-family: var(--font-display); font-size: 5rem; font-weight: 700; color: var(--accent-dim); position: absolute; top: 2rem; right: 1.5rem; line-height: 1; user-select: none; }
+        .slide h2 { font-family: var(--font-display); font-size: 1.9rem; font-weight: 700; color: var(--accent); margin-bottom: 1.5rem; line-height: 1.25; }
+        .slide h3 { font-family: var(--font-display); font-size: 1.3rem; font-weight: 600; color: var(--text-primary); margin-top: 1.5rem; margin-bottom: 0.75rem; }
+        .slide p { margin-bottom: 1rem; color: var(--text-secondary); }
+        .slide p strong { color: var(--text-primary); }
+        .slide ul, .slide ol { margin-bottom: 1rem; padding-left: 1.5rem; color: var(--text-secondary); }
+        .slide li { margin-bottom: 0.4rem; }
+        .slide li strong { color: var(--text-primary); }
+        .table-wrap { overflow-x: auto; margin: 1.25rem 0; border-radius: 8px; border: 1px solid var(--border); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th { background: var(--bg-code); color: var(--accent); font-weight: 600; text-align: left; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); font-family: var(--font-display); white-space: nowrap; }
+        td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
+        tr:last-child td { border-bottom: none; }
+        tr:nth-child(even) td { background: rgba(13, 17, 23, 0.5); }
+        .diagram-grid { display: grid; gap: 0.75rem; margin: 1.5rem 0; padding: 1.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; }
+        .diagram-grid.cols-2 { grid-template-columns: 1fr 1fr; }
+        .diagram-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+        .diagram-panel { padding: 1rem; background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px; }
+        .diagram-panel.accent-border { border-left: 3px solid var(--accent); }
+        .diagram-panel.r { border-left: 3px solid var(--accent-2); }
+        .diagram-panel.y { border-left: 3px solid var(--accent-3); }
+        .diagram-panel.g { border-left: 3px solid var(--accent-4); }
+        .diagram-panel h4 { font-family: var(--font-display); font-size: 1rem; color: var(--accent); margin-bottom: 0.5rem; }
+        .diagram-panel.r h4 { color: var(--accent-2); }
+        .diagram-panel.y h4 { color: var(--accent-3); }
+        .diagram-panel.g h4 { color: var(--accent-4); }
+        .diagram-panel p, .diagram-panel ul { font-size: 0.9rem; }
+        .callout { background: var(--bg-card); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1rem 1.25rem; margin: 1.25rem 0; }
+        .callout p { margin-bottom: 0; }
+        .callout .callout-label { font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem; }
+        .quote { font-family: var(--font-display); font-size: 1.1rem; font-style: italic; color: var(--text-primary); padding: 1rem 1.5rem; border-left: 3px solid var(--accent); background: var(--bg-card); margin: 1.25rem 0; border-radius: 0 8px 8px 0; }
+        .quote .attr { display: block; margin-top: 0.5rem; font-style: normal; font-size: 0.85rem; color: var(--text-secondary); font-family: var(--font-mono); }
+        .canvas-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 1.25rem 0; overflow-x: auto; }
+        .canvas-wrap canvas, .canvas-wrap svg { display: block; margin: 0 auto; max-width: 100%; }
+        .control-panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin: 1.25rem 0; }
+        .control-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+        .control-row label { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-secondary); min-width: 130px; }
+        .control-row input[type="range"] { flex: 1; min-width: 150px; accent-color: var(--accent); }
+        .control-row select, .control-row input[type="number"] { background: var(--bg-code); border: 1px solid var(--border); color: var(--text-primary); border-radius: 4px; padding: 0.3rem 0.5rem; font-family: var(--font-mono); font-size: 0.8rem; }
+        .control-row .val { font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent); min-width: 80px; text-align: right; }
+        .btn { font-family: var(--font-mono); font-size: 0.8rem; padding: 0.4rem 0.9rem; background: var(--accent-dim); color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer; transition: background 0.15s ease; }
+        .btn:hover { background: rgba(66,133,244,0.2); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn.secondary { background: var(--bg-code); color: var(--text-secondary); border-color: var(--border); }
+        .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.5rem; margin-top: 0.75rem; }
+        .metric { background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; text-align: center; }
+        .metric .metric-label { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.08em; }
+        .metric .metric-value { font-family: var(--font-display); font-size: 1.25rem; color: var(--accent); font-weight: 600; margin-top: 0.2rem; }
+        .contents-list { list-style: none; padding-left: 0; counter-reset: contents; }
+        .contents-list li { counter-increment: contents; padding: 0.6rem 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 1rem; }
+        .contents-list li:last-child { border-bottom: none; }
+        .contents-list li::before { content: counter(contents, decimal-leading-zero); font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent); min-width: 2rem; }
+        .contents-list a { color: var(--text-primary); text-decoration: none; }
+        .contents-list a:hover { color: var(--accent); }
+        .footer { text-align: center; padding: 3rem 1.5rem; color: var(--text-secondary); font-size: 0.85rem; border-top: 1px solid var(--border); max-width: var(--max-width); margin: 0 auto; }
+        .footer a { color: var(--accent); text-decoration: none; }
+        @media (max-width: 640px) {
+            .slide { padding: 3rem 1rem; min-height: auto; }
+            .slide-number { font-size: 3rem; top: 1.5rem; right: 1rem; }
+            .slide h2 { font-size: 1.5rem; }
+            .diagram-grid.cols-2, .diagram-grid.cols-3 { grid-template-columns: 1fr; }
+            .hero h1 { font-size: 1.8rem; }
+            table { font-size: 0.78rem; }
+        }
+    </style>
+</head>
+<body>
+
+<header class="hero">
+    <div class="series-label">Google TPUs Series &mdash; Presentation 03</div>
+    <h1>Inside the <span class="accent">Systolic Array</span> &mdash; The Matmul Engine</h1>
+    <p class="subtitle">From Kung &amp; Leiserson's 1978 paper to the 256&times;256 MAC grid at the heart of every TPU. Why this 47-year-old idea is the reason Google's chips work.</p>
+
+    <div class="tags">
+        <span class="tag">Kung 1978</span><span class="tag">Warp / iWarp</span>
+        <span class="tag">Weight-Stationary</span><span class="tag">Output-Stationary</span>
+        <span class="tag">Eyeriss</span><span class="tag">MXU</span>
+    </div>
+
+    <div class="pipeline">
+        <span class="pipeline-step">Mead &amp; Conway VLSI</span>
+        <span class="pipeline-arrow">&rarr;</span>
+        <span class="pipeline-step">Kung-Leiserson 1978</span>
+        <span class="pipeline-arrow">&rarr;</span>
+        <span class="pipeline-step">"Why Systolic?" 1982</span>
+        <span class="pipeline-arrow">&rarr;</span>
+        <span class="pipeline-step">CMU Warp / iWarp</span>
+        <span class="pipeline-arrow">&rarr;</span>
+        <span class="pipeline-step">90s decline</span>
+        <span class="pipeline-arrow">&rarr;</span>
+        <span class="pipeline-step">TPU v1 revival 2015</span>
+    </div>
+</header>
+
+<section class="slide" id="slide-00">
+    <div class="slide-number">00</div>
+    <h2>Topics We'll Cover</h2>
+    <ul class="contents-list">
+        <li><a href="#slide-01">What's a Systolic Array?</a></li>
+        <li><a href="#slide-02">Kung &amp; Leiserson, 1978</a></li>
+        <li><a href="#slide-03">"Why Systolic Architectures?" &mdash; Kung 1982</a></li>
+        <li><a href="#slide-04">CMU Warp &amp; Intel iWarp</a></li>
+        <li><a href="#slide-05">The 1990s Decline</a></li>
+        <li><a href="#slide-06">The Three Dataflows</a></li>
+        <li><a href="#slide-07">The TPU's Choice &mdash; Weight-Stationary</a></li>
+        <li><a href="#slide-08">How a 256&times;256 Array Maps a Matmul</a></li>
+        <li><a href="#slide-09">Interactive: Wavefront Visualiser</a></li>
+        <li><a href="#slide-10">Throughput &amp; Utilisation</a></li>
+        <li><a href="#slide-11">Comparison with Other Accelerators</a></li>
+        <li><a href="#slide-12">Cheat Sheet</a></li>
+    </ul>
+</section>
+
+<section class="slide" id="slide-01">
+    <div class="slide-number">01</div>
+    <h2>What's a Systolic Array?</h2>
+    <p>A systolic array is a 2D grid of identical, simple processing elements (PEs) that pump data through themselves like blood through a heart &mdash; data <em>moves</em>, computation happens at each beat, and the result emerges from the boundary. The name is Kung's; the analogy is medical.</p>
+
+    <div class="quote">
+        A systolic system consists of a set of interconnected cells, each capable of performing some simple operation. Information in a systolic system flows between cells in a pipelined fashion, and communication with the outside world occurs only at the boundary cells.
+        <span class="attr">&mdash; H.T. Kung, "Why Systolic Architectures?", IEEE Computer, January 1982</span>
+    </div>
+
+    <h3>Three defining properties</h3>
+    <ul>
+        <li><strong>Local communication only.</strong> Every PE talks to its 2&ndash;4 nearest neighbours. No buses, no global wires, no broadcast. This is the property that makes them buildable in VLSI &mdash; long wires are slow, expensive in area, and dominate power.</li>
+        <li><strong>Regular structure.</strong> The same PE is replicated across the entire chip. Layout is a copy-and-paste exercise; verification is one PE plus its boundary conditions.</li>
+        <li><strong>Pipelined dataflow.</strong> Data is moving every cycle. Each operand visits many PEs on its journey through the array, doing useful work at each one. The host system "pumps" inputs into one edge and reads outputs from another.</li>
+    </ul>
+
+    <div class="callout">
+        <div class="callout-label">The compute-density argument</div>
+        <p>If you remove caches, branch predictors, instruction decoders, and replace all that with a tile of multiply-accumulate units that fire every cycle, you get an enormous arithmetic-intensity advantage per unit of silicon. TPU v1 fits 65,536 MAC units in a 28&nbsp;nm die smaller than a contemporary mid-range CPU.</p>
+    </div>
+</section>
+
+<section class="slide" id="slide-02">
+    <div class="slide-number">02</div>
+    <h2>Kung &amp; Leiserson, 1978</h2>
+    <p>The paper that names the field is <strong>"Systolic Arrays (for VLSI)"</strong> by H.T. Kung and Charles Leiserson at Carnegie Mellon, circulated as CMU technical report <strong>CMU-CS-79-103</strong> (1979) but written and presented in 1978 at the Sparse Matrix Symposium. A condensed version appears as Section 8.3 of Mead &amp; Conway's <em>Introduction to VLSI Systems</em> (Addison-Wesley, 1980), the textbook that taught the world how to design chips.</p>
+
+    <h3>Why 1978 was the right year</h3>
+    <ul>
+        <li><strong>VLSI was new.</strong> Mead &amp; Conway's design rules made it possible for university groups to design their own chips for the first time. Before that, chip design was an industrial activity.</li>
+        <li><strong>Wires were the cost.</strong> The Mead &amp; Conway analysis was explicit: in CMOS, transistors are cheap, wires are expensive, long wires are very expensive. Architectures with regular local communication are the only ones that scale.</li>
+        <li><strong>Algorithms had not yet been mapped.</strong> Kung's contribution was to take a long list of dense linear-algebra and signal-processing kernels (matmul, convolution, FIR filtering, LU factorisation) and show how each one mapped naturally to a 1D or 2D systolic structure.</li>
+    </ul>
+
+    <h3>The Kung &amp; Leiserson paper, in one diagram</h3>
+    <p>Their Figure 1 shows a 1D linear array of MAC units computing <code>y = Ax</code> for a banded matrix <code>A</code>. Each PE holds one element of <code>A</code>. The vector <code>x</code> streams in from the left, partial sums of <code>y</code> stream out to the right, and on every clock each PE computes <code>partial += a * x</code> and forwards <code>x</code>. The 2D extension to dense matmul is one paragraph and one figure.</p>
+
+    <p>The paper closes with what would, decades later, become the TPU's design philosophy: <em>"these algorithms can be implemented as special-purpose hardware that achieves much higher performance than general-purpose computers"</em>.</p>
+</section>
+
+<section class="slide" id="slide-03">
+    <div class="slide-number">03</div>
+    <h2>"Why Systolic Architectures?" &mdash; Kung 1982</h2>
+    <p>Four years later, Kung published a single-author review in IEEE Computer that became the field's most-cited paper. Its three contributions:</p>
+
+    <div class="diagram-grid cols-3">
+        <div class="diagram-panel accent-border">
+            <h4>1. The pump analogy</h4>
+            <p>Naming it. "Systole" is the heart-pump phase that pushes blood through the body. The architecture's defining feature is that data <em>moves</em> on every clock and computes along the way.</p>
+        </div>
+        <div class="diagram-panel y">
+            <h4>2. The I/O-bound argument</h4>
+            <p>If you have N PEs you need an I/O bandwidth proportional to N to keep them busy &mdash; <em>unless</em> you re-use each operand many times. Systolic arrays are the canonical answer: each input value visits O(N) PEs.</p>
+        </div>
+        <div class="diagram-panel g">
+            <h4>3. The algorithm taxonomy</h4>
+            <p>Tables of which kernels map to which structure. 1D linear arrays for FIR filters and 1D convolution; 2D meshes for matmul and 2D convolution; hex arrays for transitive closure; trees for sorting. Each row of the table is a future ASIC.</p>
+        </div>
+    </div>
+
+    <h3>The argument in one inequality</h3>
+    <p>Kung's quantitative core: a systolic array of side N processing M elements gives you O(NM) compute work for O(M) I/O &mdash; arithmetic intensity of N. For a 256&times;256 array doing a matmul, that's 256 ops per byte of input bandwidth. The DRAM you have can keep up. <strong>This is the same arithmetic-intensity argument that justifies tensor cores today</strong> &mdash; it just took 35 years for a workload to need it badly enough to fund the silicon.</p>
+
+    <div class="callout">
+        <div class="callout-label">A direct line to the TPU</div>
+        <p>The 2017 ISCA TPU paper cites Kung 1982 explicitly, and Jouppi has said in talks that the v1 design started from a literal copy of the Kung-Leiserson 2D matrix-multiply array, scaled to 256&times;256 to fit a 28&nbsp;nm die budget. The chip is, structurally, a 1978 idea on a 2014 process.</p>
+    </div>
+</section>
+
+<section class="slide" id="slide-04">
+    <div class="slide-number">04</div>
+    <h2>CMU Warp &amp; Intel iWarp</h2>
+    <p>The first generation of systolic-array hardware, built by Kung's group at CMU, ran from 1985 to the early 1990s. Three machines:</p>
+
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Machine</th><th>Year</th><th>Cells</th><th>Performance</th><th>Industrial partner</th></tr></thead>
+            <tbody>
+                <tr><td><strong>WW-Warp</strong> (Wire-Wrap)</td><td>1985&ndash;86</td><td>2-cell prototype, then 10</td><td>~10 MFLOPS/cell</td><td>GE, Honeywell</td></tr>
+                <tr><td><strong>PC-Warp</strong> (Printed Circuit)</td><td>1987&ndash;88</td><td>10 cells</td><td>~10 MFLOPS/cell</td><td>GE</td></tr>
+                <tr><td><strong>iWarp</strong></td><td>1990&ndash;93</td><td>up to ~64 cells per array</td><td>20 MFLOPS/cell @ 20 MHz</td><td>Intel</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Warp's three architectural lessons</h3>
+    <ul>
+        <li><strong>Each cell is a small VLIW.</strong> Pure systolic arrays of MAC units are too rigid for general use; Warp's cells were programmable VLIW processors with their own register file. <em>This is also true of the TPU's MXU &mdash; the cells are not single MACs, they're pipelined multiplier-accumulators with control.</em></li>
+        <li><strong>Compiler is everything.</strong> The W2 compiler turned high-level Fortran-style numerical code into systolic schedules. <em>XLA does the same job for the TPU.</em></li>
+        <li><strong>The bottleneck is moving data <em>between</em> the array and the host.</strong> Warp shipped with custom DMA engines and dedicated I/O cells. <em>The TPU has explicit DMA engines and a software-managed VMEM scratchpad for exactly this reason.</em></li>
+    </ul>
+
+    <p>The iWarp project shipped about 39 systems before Intel exited in 1993. Commercially small, intellectually large &mdash; the entire engineering DNA of TPU v1 traces through Warp.</p>
+
+    <div class="callout">
+        <div class="callout-label">Patterson on Warp &rarr; TPU</div>
+        <p>David Patterson has said in talks that the TPU programme treated the Warp/iWarp work as the canonical reference for "what a systolic-array supercomputer actually looks like at engineering scale" &mdash; including all the unglamorous parts (compiler, I/O, memory hierarchy, system integration) that the original 1978 paper did not need to address.</p>
+    </div>
+</section>
+
+<section class="slide" id="slide-05">
+    <div class="slide-number">05</div>
+    <h2>The 1990s Decline</h2>
+    <p>By 1996, systolic arrays were considered an architectural dead end. Three reasons converged:</p>
+
+    <div class="diagram-grid cols-3">
+        <div class="diagram-panel r">
+            <h4>The DRAM bandwidth wall</h4>
+            <p>An N&times;N array of MACs needs O(N) bytes per cycle to keep busy. By the early 90s memory bandwidth was lagging compute exponentially &mdash; the gap eventually called the "memory wall" in Wulf-McKee 1995. Systolic arrays starved.</p>
+        </div>
+        <div class="diagram-panel y">
+            <h4>Microprocessor exponential</h4>
+            <p>Pentium-class CPUs riding Dennard scaling were getting a free 1.5&times;/year on single-thread performance. A custom systolic ASIC that took two years to design was beaten by the next general-purpose Pentium before it shipped.</p>
+        </div>
+        <div class="diagram-panel g">
+            <h4>Killer application missing</h4>
+            <p>Outside specialised signal processing, no civilian workload <em>needed</em> 256&times;256 dense matmul. Without an application, no one funded the silicon. MasPar, Thinking Machines, Cray's MPP unit all failed between 1993 and 1996.</p>
+        </div>
+    </div>
+
+    <h3>The hibernation, 1996&ndash;2014</h3>
+    <p>For nearly two decades systolic arrays survived only in narrow niches: Fourier-transform accelerators, beamforming ASICs in radar, video-compression chips, and a few academic exercises. They were taught in computer-architecture textbooks as a historical milestone, not as a current technique.</p>
+
+    <p>And then deep learning happened. By 2014 the dominant compute pattern in industrial ML was <strong>large dense matrix multiplications on small batches of low-precision integers</strong> &mdash; exactly the workload Kung had been trying to find since 1978. The TPU is what happens when a 36-year-old idea finally meets the workload it was waiting for.</p>
+</section>
+
+<section class="slide" id="slide-06">
+    <div class="slide-number">06</div>
+    <h2>The Three Dataflows</h2>
+    <p>For the matmul <code>C = A &times; B</code>, with the array of PEs holding partial accumulators, you have three choices about <em>which value stays still</em>. This is the field's main taxonomy.</p>
+
+    <div class="diagram-grid cols-3">
+        <div class="diagram-panel accent-border">
+            <h4>Weight-Stationary (WS)</h4>
+            <p>Pre-load the weight matrix <code>A</code> into the array; weights stay put. Activations <code>B</code> stream in skewed; partial sums propagate down (or right). Final outputs emerge at one boundary.</p>
+            <p><strong>Used by:</strong> TPU MXU, NVDLA, most modern ML accelerators.</p>
+            <p><strong>Wins:</strong> weights re-used across many activations &mdash; ideal when weights are large and shared.</p>
+        </div>
+        <div class="diagram-panel y">
+            <h4>Output-Stationary (OS)</h4>
+            <p>Pin a partial accumulator in each PE. Both <code>A</code> and <code>B</code> stream through; each PE keeps adding to its own output. When done, drain accumulators.</p>
+            <p><strong>Used by:</strong> early DSP arrays, some FPGA matmul cores.</p>
+            <p><strong>Wins:</strong> no accumulator data movement; minimum write bandwidth at the boundary.</p>
+        </div>
+        <div class="diagram-panel g">
+            <h4>Row-Stationary (RS)</h4>
+            <p>MIT Eyeriss (ISCA 2016, Chen / Emer / Sze). Each row of <code>A</code>, <code>B</code>, <code>C</code> stays local to a PE; partial sums travel diagonally. Hand-tuned to maximise data re-use across all three matrices.</p>
+            <p><strong>Used by:</strong> Eyeriss; not adopted by industry chips at scale.</p>
+            <p><strong>Wins:</strong> 1.4&ndash;2.5&times; energy improvement on AlexNet vs WS/OS in the original paper.</p>
+        </div>
+    </div>
+
+    <div class="callout">
+        <div class="callout-label">Why the choice matters</div>
+        <p>The dataflow choice is the single biggest architectural decision in any systolic accelerator. It determines bandwidth requirements at every level of the memory hierarchy, the layout of operands in SRAM, the optimal tile size, the latency to first output, and the pipeline-fill cost. Most public TPU descriptions get this right (weight-stationary); some popular write-ups call it output-stationary, which is incorrect &mdash; the TPU's MXU loads weights in advance and streams activations.</p>
+    </div>
+</section>
+
+<section class="slide" id="slide-07">
+    <div class="slide-number">07</div>
+    <h2>The TPU's Choice &mdash; Weight-Stationary</h2>
+    <p>The TPU MXU pre-loads weights into the array before each tile of work, then streams activations. Why?</p>
+
+    <div class="diagram-grid cols-2">
+        <div class="diagram-panel accent-border">
+            <h4>Workload-driven argument</h4>
+            <ul>
+                <li>In LLM inference the weight tensor is <em>much larger</em> than any single activation tile and is re-used across the whole batch and the whole sequence.</li>
+                <li>Loading a 128&times;128 weight tile once and reusing it for 128 activation rows = 128&times; reuse on the most expensive operand.</li>
+                <li>Activations are smaller, change frequently, and stream cleanly from VMEM.</li>
+            </ul>
+        </div>
+        <div class="diagram-panel y">
+            <h4>Engineering argument</h4>
+            <ul>
+                <li>Weights live in HBM. HBM bandwidth is precious. Minimising weight bandwidth is the dominant optimisation.</li>
+                <li>Weight-stationary needs only one weight tile transfer per N activation tiles.</li>
+                <li>Output-stationary needs <em>all three</em> matrices streaming &mdash; double the SRAM bandwidth for no compute gain.</li>
+            </ul>
+        </div>
+    </div>
+
+    <h3>The mechanics, in one sentence</h3>
+    <p>For each tile: (1) DMA a 128&times;128 weight tile from HBM into the MXU through the weight FIFO, (2) feed activations from VMEM into the array's left edge skewed by row, (3) partial sums propagate top-to-bottom and accumulate in the bottom row, (4) drain results into accumulators or back to VMEM.</p>
+
+    <div class="callout">
+        <div class="callout-label">Why "MXU" is not a synonym for "systolic array"</div>
+        <p>Internally the TPU MXU is a systolic array of MAC PEs. But there are several MXUs per chip (one per TensorCore in v2, two in v3, four in v4 and later), each fed by a vector unit and a scalar unit, with explicit accumulators and a weight FIFO. The systolic core is the <em>compute</em>; the rest of the MXU is the plumbing that keeps it fed. Most of the engineering effort in a TPU goes into the plumbing.</p>
+    </div>
+</section>
+
+<section class="slide" id="slide-08">
+    <div class="slide-number">08</div>
+    <h2>How a 256&times;256 Array Maps a Matmul</h2>
+    <p>For TPU v1's single 256&times;256 array, computing <code>C[M&times;N] = A[M&times;K] &times; B[K&times;N]</code> with <code>M = N = K = 256</code>:</p>
+
+    <ol>
+        <li><strong>Cycle 0:</strong> The weight matrix <code>A</code> (or for inference convention, the weight tile of <code>B</code>) is already loaded into the 65,536 PEs &mdash; one weight per PE.</li>
+        <li><strong>Cycles 0&ndash;255:</strong> Activations enter from the left, <em>skewed</em>: row 0 enters at cycle 0, row 1 at cycle 1, &hellip;, row 255 at cycle 255. Each cycle's worth of input is one column-vector entering each row.</li>
+        <li><strong>Cycles 0&ndash;510:</strong> A diagonal wavefront of valid compute sweeps the array. At cycle <em>t</em> the PEs on the anti-diagonal <em>i+j = t</em> are doing useful multiply-accumulate work; all others are still in fill or already drained.</li>
+        <li><strong>Cycles 255&ndash;510:</strong> Partial sums propagate downwards through the array, accumulating one term at a time. The output emerges from the bottom row, one column per cycle.</li>
+        <li><strong>Total latency:</strong> M + N + K &minus; 2 = 766 cycles to fully process one 256&times;256&times;256 matmul on a 256&times;256 array, a tiny fraction of which is fill or drain.</li>
+    </ol>
+
+    <h3>The wavefront pattern</h3>
+    <p>The visualisation on the next slide shows this concretely. The PEs that are firing at any one cycle form a moving anti-diagonal &mdash; a wavefront sweeping from the top-left to the bottom-right.</p>
+
+    <div class="callout">
+        <div class="callout-label">Why this is hard to write yourself</div>
+        <p>If you tried to schedule this on a CPU you'd have a giant nested loop, with explicit shift registers, careful boundary handling, and probably an off-by-one error somewhere on the skew. On a systolic array <strong>the structure of the chip is the schedule</strong> &mdash; the only thing the compiler emits is "feed these tiles, in this order, then read these accumulators". This is the property that makes XLA tractable; lowering an HLO matmul to TPU code is largely a tile-size choice, not a scheduling problem.</p>
+    </div>
+</section>
+
+<section class="slide" id="slide-09">
+    <div class="slide-number">09</div>
+    <h2>Interactive: Wavefront Visualiser</h2>
+    <p>An 8&times;8 systolic array (smaller than the TPU's 128&times;128 MXU for visibility). Press <em>Step</em> to advance one cycle at a time and watch the diagonal wavefront move. The number in each cell is its current accumulator value as integer multiplies fire.</p>
+
+    <div class="control-panel">
+        <div class="control-row">
+            <label>Array size</label>
+            <select id="size">
+                <option value="4">4×4</option>
+                <option value="8" selected>8×8</option>
+                <option value="12">12×12</option>
+            </select>
+            <label style="margin-left: 1rem;">Speed</label>
+            <input type="range" id="speed" min="60" max="800" value="280">
+            <span class="val" id="speed-val">280 ms</span>
+        </div>
+        <div class="control-row">
+            <button class="btn" id="run">Run</button>
+            <button class="btn secondary" id="step">Step</button>
+            <button class="btn secondary" id="reset">Reset</button>
+            <span class="val" id="cycle">cycle 0</span>
+        </div>
+    </div>
+
+    <div class="canvas-wrap">
+        <svg id="sa-svg" viewBox="0 0 700 480" width="700" height="480" xmlns="http://www.w3.org/2000/svg">
+            <style>
+                .pe { fill: #161b22; stroke: #21262d; stroke-width: 1; }
+                .pe.firing { fill: rgba(66,133,244,0.32); stroke: #4285F4; stroke-width: 1.5; }
+                .pe.done { fill: rgba(52,168,83,0.18); stroke: #34A853; stroke-width: 1; }
+                .pe-label { fill: #e6edf3; font-family: 'JetBrains Mono', monospace; font-size: 11px; text-anchor: middle; }
+                .actv { fill: rgba(251,188,4,0.5); stroke: #FBBC04; }
+                .out { fill: rgba(234,67,53,0.5); stroke: #EA4335; }
+                .arrow { stroke: #4285F4; stroke-width: 1.4; fill: none; marker-end: url(#arr); }
+                .lbl { fill: #8b949e; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+                .ann { fill: #e6edf3; font-family: 'Space Grotesk', sans-serif; font-size: 12px; }
+            </style>
+            <defs>
+                <marker id="arr" markerWidth="6" markerHeight="6" refX="6" refY="3" orient="auto">
+                    <polygon points="0 0, 6 3, 0 6" fill="#4285F4"/>
+                </marker>
+            </defs>
+            <text x="350" y="20" class="ann" text-anchor="middle">8×8 weight-stationary array — activations stream from left, partial sums from top</text>
+            <text x="60" y="240" class="lbl" text-anchor="middle">activations</text>
+            <text x="60" y="252" class="lbl" text-anchor="middle">(skewed)</text>
+            <text x="640" y="240" class="lbl" text-anchor="middle">drained</text>
+            <text x="350" y="465" class="lbl" text-anchor="middle">↓ partial sums emerge from the bottom row ↓</text>
+            <g id="sa-grid"></g>
+        </svg>
+    </div>
+
+    <div class="metric-grid">
+        <div class="metric"><div class="metric-label">Cycle</div><div class="metric-value" id="m-cycle">0</div></div>
+        <div class="metric"><div class="metric-label">PEs firing</div><div class="metric-value" id="m-firing">0</div></div>
+        <div class="metric"><div class="metric-label">PEs done</div><div class="metric-value" id="m-done">0</div></div>
+        <div class="metric"><div class="metric-label">Utilisation</div><div class="metric-value" id="m-util">0%</div></div>
+    </div>
+
+    <script>
+    (function(){
+        var N = 8;
+        var cycle = 0;
+        var running = false;
+        var timer = null;
+        var grid = document.getElementById('sa-grid');
+        var sizeSel = document.getElementById('size');
+        var speedSlider = document.getElementById('speed');
+        var speedVal = document.getElementById('speed-val');
+        var cycleLbl = document.getElementById('cycle');
+        var mCycle = document.getElementById('m-cycle');
+        var mFiring = document.getElementById('m-firing');
+        var mDone = document.getElementById('m-done');
+        var mUtil = document.getElementById('m-util');
+
+        function render() {
+            var startX = 130, startY = 50;
+            var available = 480;
+            var size = Math.min(40, Math.floor(available / N));
+            var firing = 0, done = 0;
+            var html = '';
+            for (var i = 0; i < N; i++) {
+                for (var j = 0; j < N; j++) {
+                    var x = startX + j*size;
+                    var y = startY + i*size;
+                    // PE at (i,j) starts firing at cycle i+j and stops at i+j+N (after N input rows passed)
+                    var t0 = i + j;
+                    var t1 = i + j + N;
+                    var cls = 'pe';
+                    if (cycle >= t0 && cycle < t1) { cls = 'pe firing'; firing++; }
+                    else if (cycle >= t1) { cls = 'pe done'; done++; }
+                    var v = (cycle >= t0) ? Math.min(cycle - t0 + 1, N) : 0;
+                    html += '<rect class="'+cls+'" x="'+x+'" y="'+y+'" width="'+(size-2)+'" height="'+(size-2)+'" rx="3"/>';
+                    html += '<text class="pe-label" x="'+(x+(size-2)/2)+'" y="'+(y+(size-2)/2+4)+'">'+v+'</text>';
+                }
+            }
+            grid.innerHTML = html;
+            cycleLbl.textContent = 'cycle ' + cycle;
+            mCycle.textContent = cycle;
+            mFiring.textContent = firing;
+            mDone.textContent = done;
+            mUtil.textContent = Math.round(100*firing/(N*N)) + '%';
+        }
+        function step() {
+            if (cycle >= 3*N) { running = false; clearInterval(timer); document.getElementById('run').textContent = 'Run'; return; }
+            cycle++;
+            render();
+        }
+        document.getElementById('step').addEventListener('click', step);
+        document.getElementById('run').addEventListener('click', function(){
+            running = !running;
+            this.textContent = running ? 'Pause' : 'Run';
+            if (running) {
+                timer = setInterval(step, parseInt(speedSlider.value));
+            } else {
+                clearInterval(timer);
+            }
+        });
+        document.getElementById('reset').addEventListener('click', function(){
+            cycle = 0; running = false; clearInterval(timer);
+            document.getElementById('run').textContent = 'Run';
+            render();
+        });
+        sizeSel.addEventListener('change', function(){
+            N = parseInt(this.value); cycle = 0; render();
+        });
+        speedSlider.addEventListener('input', function(){
+            speedVal.textContent = this.value + ' ms';
+            if (running) { clearInterval(timer); timer = setInterval(step, parseInt(this.value)); }
+        });
+        render();
+    })();
+    </script>
+
+    <p>Yellow PE values are accumulating; green PEs have drained. The wavefront is the diagonal band of yellow. Notice that even on this small array, peak utilisation (the centre of the wavefront) reaches 100% only briefly &mdash; the average over a single matmul is around 50% before fill / drain are amortised. <strong>Hence why TPUs love big batches.</strong></p>
+</section>
+
+<section class="slide" id="slide-10">
+    <div class="slide-number">10</div>
+    <h2>Throughput &amp; Utilisation</h2>
+    <p>The TPU v1's 256&times;256 array running at 700 MHz, with each PE doing one INT8 multiply and one INT32 accumulate per cycle:</p>
+
+    <div class="metric-grid">
+        <div class="metric"><div class="metric-label">PEs</div><div class="metric-value">65,536</div></div>
+        <div class="metric"><div class="metric-label">Clock</div><div class="metric-value">700 MHz</div></div>
+        <div class="metric"><div class="metric-label">Ops / PE / cycle</div><div class="metric-value">2</div></div>
+        <div class="metric"><div class="metric-label">Peak</div><div class="metric-value">~92 TOPS</div></div>
+    </div>
+
+    <p style="margin-top:1rem;">65,536 &times; 700&nbsp;MHz &times; 2 ops/MAC = <strong>91.75 TOPS</strong>, which matches the "92 TOPS" headline figure.</p>
+
+    <h3>Pipeline-fill cost</h3>
+    <p>For a single matmul of <em>K</em> contract dimension on a 256&times;256 array, useful cycles = <em>K</em>; fill+drain = ~512 cycles. So utilisation is approximately <em>K / (K + 512)</em>. At <em>K = 1024</em> this is 67%; at <em>K = 4096</em> it's 89%; at <em>K = 16384</em> it's 97%. <strong>This is the arithmetic-intensity argument that makes TPUs prefer large batches and long contraction dimensions.</strong></p>
+
+    <h3>Why this scales</h3>
+    <p>If you double the array (e.g. v2/v3 added a second TensorCore with its own MXUs), peak doubles. If you double the clock, peak doubles. If you double the precision (e.g. v7's FP8 vs bf16), the same MAC unit can do twice as many ops. <strong>Every TPU generation has used at least two of these levers.</strong></p>
+
+    <div class="callout">
+        <div class="callout-label">The compiler's job</div>
+        <p>XLA's most important pass on a TPU target is tile-size selection: pick the largest tile that fits in VMEM and divides evenly into the activation and weight shapes, so that pipeline fill becomes a small percentage of total work. This is the <em>main</em> determinant of measured TFLOPS &mdash; you can be at 95% of peak on long contractions and 30% on short ones, all on the same chip.</p>
+    </div>
+</section>
+
+<section class="slide" id="slide-11">
+    <div class="slide-number">11</div>
+    <h2>Comparison with Other Accelerators</h2>
+    <p>The TPU is the most prominent systolic-array accelerator but not the only one in the modern landscape. The other major designs make different choices &mdash; and most are <em>not</em> systolic.</p>
+
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Architecture</th><th>Compute primitive</th><th>Scheduling</th><th>Memory model</th></tr></thead>
+            <tbody>
+                <tr><td><strong>Google TPU</strong></td><td>Systolic 2D MAC array (128&times;128 MXU on v2+, 256&times;256 on v1)</td><td>Static, compiler-issued (XLA HLO)</td><td>Software-managed VMEM/CMEM scratchpad + HBM</td></tr>
+                <tr><td><strong>NVIDIA Tensor Cores</strong></td><td>Per-SM MMA blocks (e.g. wgmma m64n256k16 on Hopper). Internals undisclosed.</td><td>Dynamic warp scheduler chooses per cycle</td><td>L1/L2 cache + register file + shared memory + HBM</td></tr>
+                <tr><td><strong>Cerebras WSE-2/3</strong></td><td>Wafer-scale 2D mesh of independent PEs with SwarmX fabric</td><td>Spatial dataflow; static placement</td><td>40 GiB on-wafer SRAM, no off-chip DRAM</td></tr>
+                <tr><td><strong>Groq LPU</strong></td><td>Deterministic VLIW streaming pipeline (TSP)</td><td>Static, deterministic, no caches at all</td><td>On-chip SRAM only; predictable cycle latency</td></tr>
+                <tr><td><strong>SambaNova RDU</strong></td><td>Reconfigurable Dataflow Architecture: pattern compute units + memory units</td><td>Compiler-mapped spatial dataflow</td><td>Tiered SRAM/HBM, mesh interconnect</td></tr>
+                <tr><td><strong>Intel Gaudi 3</strong></td><td>MME (matrix multiply engine) &mdash; systolic-style</td><td>Static + dynamic mix</td><td>HBM + SRAM scratchpad</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="callout">
+        <div class="callout-label">Honest claim about NVIDIA tensor cores</div>
+        <p>NVIDIA does not publish tensor-core internals. Microbenchmarks have argued both ways. The safe statement: at the programmer-visible level they are <em>MMA blocks</em> (matrix-multiply-accumulate primitives, e.g. <code>wmma.mma.sync.m16n16k16</code> on Volta+, <code>wgmma</code> on Hopper). They might be implemented as small systolic arrays, FMA-tree reducers, or a hybrid. The behavioural difference from a TPU MXU is large regardless: an SM has 4 of these blocks; a TPU has one or two huge ones. The <em>scheduling philosophy</em> (warp-dynamic vs compiler-static) is the much bigger architectural divergence.</p>
+    </div>
+
+    <h3>The lineage of "alumni" chips</h3>
+    <p>Several modern non-TPU accelerators are explicit philosophical descendants of the TPU. Groq was founded by ex-TPU engineer Jonathan Ross; its <em>deterministic</em> philosophy is TPU's static scheduling taken to its logical extreme. Tenstorrent's Tensix cores, Cerebras's PE meshes, even AWS Trainium: all three companies cite the TPU papers in their whitepapers. The TPU is the chip whose ideas are now everywhere.</p>
+</section>
+
+<section class="slide" id="slide-12">
+    <div class="slide-number">12</div>
+    <h2>Cheat Sheet</h2>
+    <ul>
+        <li>A <strong>systolic array</strong> is a 2D grid of identical, simple PEs that pump data through themselves on every clock; only nearest-neighbour communication; output emerges at the boundary.</li>
+        <li>Named and characterised by <strong>H.T. Kung &amp; Charles Leiserson at CMU, 1978/79</strong> (CMU-CS-79-103, "Systolic Arrays for VLSI"). Reviewed in Kung's <strong>"Why Systolic Architectures?" IEEE Computer, January 1982</strong>.</li>
+        <li>Built at engineering scale by CMU's <strong>Warp / iWarp</strong> programme (1985&ndash;93) with Intel and GE; ~39 production iWarp systems shipped.</li>
+        <li>Declined in the 1990s for three reasons: <em>DRAM bandwidth wall, microprocessor exponential, no killer app</em>. Hibernated until ~2014.</li>
+        <li>Three dataflow choices: <strong>weight-stationary (TPU)</strong>, output-stationary, row-stationary (Eyeriss). The TPU MXU is weight-stationary because weights re-use is the dominant economic factor in LLM workloads.</li>
+        <li>For TPU v1: 256&times;256 = <strong>65,536 INT8 MACs</strong> at 700 MHz = <strong>92 TOPS peak</strong>. Pipeline fill+drain = ~512 cycles per matmul; utilisation depends on contraction depth.</li>
+        <li>NVIDIA tensor cores are <em>not confirmed</em> systolic; their internals are undisclosed. Behaviourally they are per-SM MMA blocks. The scheduling difference (TPU static vs GPU dynamic) is bigger than the compute-primitive difference.</li>
+    </ul>
+
+    <div class="callout">
+        <div class="callout-label">Read next</div>
+        <p>Deck <strong>04 &mdash; Inside TPU v1</strong> takes apart the chip from this story slide by slide. Deck <strong>09 &mdash; Memory &amp; Numerics</strong> covers VMEM/CMEM and accumulator widths. Deck <strong>11 &mdash; Software Stack</strong> covers XLA's role as the systolic-schedule compiler.</p>
+    </div>
+</section>
+
+<footer class="footer">
+    <p>Part of the <a href="https://github.com/BrendanJamesLynskey/LLM_Hub_Google_TPUs">Google TPUs</a> series. Sources: Kung &amp; Leiserson, "Systolic Arrays (for VLSI)", CMU-CS-79-103; Kung, "Why Systolic Architectures?", IEEE Computer, Jan 1982; Annaratone et al., "The Warp Computer", CMU 1987; Chen et al., "Eyeriss", ISCA 2016; Jouppi et al., ISCA 2017 (arXiv:1704.04760); Telesens "Understanding Matmul on a Weight-Stationary Systolic Architecture".</p>
+</footer>
+
+</body>
+</html>
