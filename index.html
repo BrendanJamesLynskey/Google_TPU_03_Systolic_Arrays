@@ -517,7 +517,7 @@
     <p>For a single matmul of <em>K</em> contract dimension on a 256&times;256 array, useful cycles = <em>K</em>; fill+drain = ~512 cycles. So utilisation is approximately <em>K / (K + 512)</em>. At <em>K = 1024</em> this is 67%; at <em>K = 4096</em> it's 89%; at <em>K = 16384</em> it's 97%. <strong>This is the arithmetic-intensity argument that makes TPUs prefer large batches and long contraction dimensions.</strong></p>
 
     <h3>Why this scales</h3>
-    <p>If you double the array (e.g. v2/v3 added a second TensorCore with its own MXUs), peak doubles. If you double the clock, peak doubles. If you double the precision (e.g. v7's FP8 vs bf16), the same MAC unit can do twice as many ops. <strong>Every TPU generation has used at least two of these levers.</strong></p>
+    <p>If you double the array (e.g. v2/v3 added a second TensorCore with its own MXUs), peak doubles. If you double the clock, peak doubles. If you halve the precision (e.g. v7's FP8 vs bf16), the same MAC unit can do twice as many ops. <strong>Every TPU generation has used at least two of these levers.</strong></p>
 
     <div class="callout">
         <div class="callout-label">The compiler's job</div>
@@ -534,7 +534,7 @@
         <table>
             <thead><tr><th>Architecture</th><th>Compute primitive</th><th>Scheduling</th><th>Memory model</th></tr></thead>
             <tbody>
-                <tr><td><strong>Google TPU</strong></td><td>Systolic 2D MAC array (128&times;128 MXU on v2+, 256&times;256 on v1)</td><td>Static, compiler-issued (XLA HLO)</td><td>Software-managed VMEM/CMEM scratchpad + HBM</td></tr>
+                <tr><td><strong>Google TPU</strong></td><td>Systolic 2D MAC array (128&times;128 MXUs on v2&ndash;v5, enlarged on Trillium; 256&times;256 on v1)</td><td>Static, compiler-issued (XLA HLO)</td><td>Software-managed VMEM/CMEM scratchpad + HBM</td></tr>
                 <tr><td><strong>NVIDIA Tensor Cores</strong></td><td>Per-SM MMA blocks (e.g. wgmma m64n256k16 on Hopper). Internals undisclosed.</td><td>Dynamic warp scheduler chooses per cycle</td><td>L1/L2 cache + register file + shared memory + HBM</td></tr>
                 <tr><td><strong>Cerebras WSE-2/3</strong></td><td>Wafer-scale 2D mesh of independent PEs with SwarmX fabric</td><td>Spatial dataflow; static placement</td><td>40 GiB on-wafer SRAM, no off-chip DRAM</td></tr>
                 <tr><td><strong>Groq LPU</strong></td><td>Deterministic VLIW streaming pipeline (TSP)</td><td>Static, deterministic, no caches at all</td><td>On-chip SRAM only; predictable cycle latency</td></tr>
